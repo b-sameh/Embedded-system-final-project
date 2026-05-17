@@ -1,0 +1,100 @@
+/**
+ * ============================================================================
+ * Course: CSE211s Introduction to Embedded Systems (Spring 2026)
+ * Institution: Faculty of Engineering, Ain Shams University
+ * Project: Obstacle-Following Robot Car using HC-SR04 & Nucleo Board
+ * ============================================================================
+ */
+
+#include "mbed.h"
+
+// --- 1. Hardware Pin Definitions ---
+DigitalOut trigger(D7);          // Send 10us trigger pulse to HC-SR04
+InterruptIn echo(D8);            // Input pin to capture echo pulse duration
+
+// Left DC Motor H-Bridge Interface
+PwmOut motorLeftPWM(D9);         // Hardware PWM output pin for left motor speed
+DigitalOut leftIn1(D12);         // H-bridge direction pin 1 (Left)
+DigitalOut leftIn2(D11);         // H-bridge direction pin 2 (Left)
+
+// Right DC Motor H-Bridge Interface
+PwmOut motorRightPWM(D10);       // Hardware PWM output pin for right motor speed
+DigitalOut rightIn1(D4);         // H-bridge direction pin 1 (Right)
+DigitalOut rightIn2(D5);         // H-bridge direction pin 2 (Right)
+
+// --- 2. Communication Interface ---
+static BufferedSerial pc(USBTX, USBRX, 9600); // UART telemetry streaming
+
+// --- 3. Hardware Timers & Global Variables ---
+Timer pulseTimer;                // Measures ultrasonic echo duration in us
+volatile float measured_dist = 0;// Shared global tracking distance in cm
+const float TARGET_DIST = 25.0f; // Target tracking distance boundary
+const float STOP_DIST = 10.0f;   // Emergency safety stopping boundary
+const float MAX_DIST = 500.0f;   // Sensor boundary limit to filter noise
+
+// --- 4. Interrupt Service Routines (ISRs) ---
+void onEchoRise() {
+    pulseTimer.reset();          // Clear previous timer cycles
+    pulseTimer.start();          // Begin hardware clock timing
+}
+
+void onEchoFall() {
+    pulseTimer.stop();           // Freeze clock counter immediately
+    // Compute distance (Time in us * Speed of sound 0.0343 cm/us) / 2
+    measured_dist = (pulseTimer.elapsed_time().count() * 0.0343f) / 2.0f;
+}
+
+// --- 5. Modular Motor Control Driver ---
+void moveRobot(float speed, bool forward) {
+    if (speed > 0.0f) {
+        if (forward) {
+            leftIn1 = 1; leftIn2 = 0;   // Left forward
+            rightIn1 = 1; rightIn2 = 0; // Right forward
+        } else {
+            leftIn1 = 0; leftIn2 = 1;   // Left reverse
+            rightIn1 = 0; rightIn2 = 1; // Right reverse
+        }
+    } else {
+        leftIn1 = 0; leftIn2 = 0;       // Safe coasting / brake state
+        rightIn1 = 0; rightIn2 = 0;
+    }
+    motorLeftPWM.write(speed);   // Set PWM duty cycle
+    motorRightPWM.write(speed);
+}
+
+// --- 6. Main Application Loop ---
+int main() {
+    ThisThread::sleep_for(2s);   // Stabilization delay for Serial monitor
+
+    // Attach non-blocking edge-triggered vectors to echo input transitions
+    echo.rise(&onEchoRise);
+    echo.fall(&onEchoFall);
+    
+    // Set hardware PWM to 1ms (1kHz frequency) for low-speed motor stability
+    motorLeftPWM.period(0.001f);      
+    motorRightPWM.period(0.001f);
+
+    printf("--- SYSTEM ONLINE (15%% Speed Mode) ---\r\n");
+
+    while (true) {
+        // Trigger Ultrasonic Pulse
+        trigger = 1;
+        wait_us(10);
+        trigger = 0;
+        
+        printf("Distance: %.2f cm\r\n", measured_dist);
+
+        // State-Driven Behavioral Decision Tree
+        if (measured_dist > STOP_DIST && measured_dist < TARGET_DIST) {
+            moveRobot(0.0f, true); // Braking zone: Obstacle within limits
+        } 
+        else if (measured_dist >= TARGET_DIST && measured_dist < MAX_DIST) {
+            moveRobot(0.35f, true); // Tracking zone: Follow forward at 35% speed
+        } 
+        else {
+            moveRobot(0.0f, true); // Safety stop: Exception / out of bounds
+        }
+
+        ThisThread::sleep_for(100ms); // 10Hz control loop update rate
+    }
+}
